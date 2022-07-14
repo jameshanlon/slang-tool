@@ -53,11 +53,15 @@ include_directories(${CMAKE_INSTALL_PREFIX}/include
 
 # Main
 add_executable(main main.cpp)
-#target_include_directories(main PUBLIC
-#  ${CMAKE_INSTALL_PREFIX}/include/surelog/surelog.h)
-target_link_libraries(main libslangcompiler libslangcore libslangparser libslangruntime ${Boost_LIBRARIES})
+add_dependencies(main slang)
+target_link_libraries(main
+  libslangcompiler
+  libslangcore
+  libslangparser
+  libslangruntime
+  ${Boost_LIBRARIES})
 
 install(TARGETS main DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-#enable_testing()
-#add_subdirectory(tests)
+enable_testing()
+add_subdirectory(tests)
