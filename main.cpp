@@ -105,19 +105,43 @@ int main(int argc, const char **argv) {
     // Create compilation objects.
     slang::Compilation compilation(options);
     slang::DiagnosticEngine diagEngine(*compilation.getSourceManager());
-    std::shared_ptr<slang::TextDiagnosticClient> diagClient;
-    diagClient = std::make_shared<slang::TextDiagnosticClient>();
+    auto diagClient = std::make_shared<slang::TextDiagnosticClient>();
     diagEngine.addClient(diagClient);
     // Load sources
     for (const slang::SourceBuffer &buffer : buffers) {
       auto tree = slang::SyntaxTree::fromBuffer(buffer, sourceManager, options);
       compilation.addSyntaxTree(tree);
     }
-    // Perform compilation.
-    for (auto &diag : compilation.getAllDiagnostics()) {
-      diagEngine.issue(diag);
-    }
-    anyErrors |= diagEngine.getNumErrors() != 0;
+    //// Diagnostic options
+    //diagClient->showColors(true);
+    //diagClient->showColumn(true);
+    //diagClient->showLocation(true);
+    //diagClient->showSourceLine(true);
+    //diagClient->showOptionName(true);
+    //diagClient->showIncludeStack(true);
+    //diagClient->showMacroExpansion(true);
+    //diagClient->showHierarchyInstance(true);
+    //diagEngine.setErrorLimit(20);
+    //diagEngine.setDefaultWarnings();
+    ////slang::Diagnostics optionDiags = diagEngine.setWarningOptions({});
+    ////slang::Diagnostics pragmaDiags = diagEngine.setMappingsFromPragmas();
+    ////for (auto& diag : optionDiags) {
+    ////  diagEngine.issue(diag);
+    ////}
+    ////for (auto& diag : pragmaDiags) {
+    ////  diagEngine.issue(diag);
+    ////}
+    //// Perform compilation.
+    //for (auto &diag : compilation.getAllDiagnostics()) {
+    //  diagEngine.issue(diag);
+    //}
+    //anyErrors |= diagEngine.getNumErrors() != 0;
+    slang::JsonWriter writer;
+    writer.setPrettyPrint(true);
+    slang::ASTSerializer serializer(compilation, writer);
+    serializer.serialize(compilation.getRoot());
+    std::cout.write(writer.view().data(), writer.view().size());
+    std::cout.flush();
   } catch (const std::exception& e) {
     slang::OS::printE("internal compiler error: {}\n", e.what());
     return 4;
