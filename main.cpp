@@ -1,151 +1,140 @@
+#include "slang/driver/Driver.h"
+
+#include <fmt/color.h>
 #include <fstream>
 #include <iostream>
 
-#include "slang/compilation/Compilation.h"
-#include "slang/diagnostics/DeclarationsDiags.h"
-#include "slang/diagnostics/DiagnosticEngine.h"
-#include "slang/diagnostics/ExpressionsDiags.h"
-#include "slang/diagnostics/LookupDiags.h"
-#include "slang/diagnostics/ParserDiags.h"
-#include "slang/diagnostics/SysFuncsDiags.h"
+#include "slang/ast/ASTSerializer.h"
+#include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/diagnostics/TextDiagnosticClient.h"
-#include "slang/parsing/Preprocessor.h"
-#include "slang/symbols/ASTSerializer.h"
-#include "slang/symbols/CompilationUnitSymbols.h"
-#include "slang/symbols/InstanceSymbols.h"
-#include "slang/syntax/SyntaxPrinter.h"
 #include "slang/syntax/SyntaxTree.h"
+#include "slang/syntax/SyntaxVisitor.h"
 #include "slang/text/Json.h"
-#include "slang/text/SourceManager.h"
-#include "slang/util/CommandLine.h"
-#include "slang/util/OS.h"
-#include "slang/util/String.h"
+#include "slang/util/TimeTrace.h"
 #include "slang/util/Version.h"
+#include "slang/ast/ASTVisitor.h"
 
+using namespace slang;
+using namespace slang::ast;
+using namespace slang::driver;
 
-static constexpr auto noteColor = fmt::terminal_color::bright_black;
-static constexpr auto warningColor = fmt::terminal_color::bright_yellow;
-static constexpr auto errorColor = fmt::terminal_color::bright_red;
-static constexpr auto highlightColor = fmt::terminal_color::bright_green;
+class ToolVisitor : public ASTVisitor<ToolVisitor, true, false> {
+public:
+  ToolVisitor() {}
 
-slang::SourceBuffer readSource(slang::SourceManager &sourceManager, const std::string &file) {
-  slang::SourceBuffer buffer = sourceManager.readSource(slang::widen(file));
-  if (!buffer) {
-    slang::OS::printE(fg(errorColor), "error: ");
-    slang::OS::printE("no such file or directory: '{}'\n", file);
+  void handle(const VariableSymbol &symbol) {
+    std::string path;
+    symbol.getHierarchicalPath(path);
+    std::cout << "Visited Variable " << path << "\n";
+    if (symbol.getFirstDriver()) {
+      const Symbol *driverSymbol = symbol.getFirstDriver()->containingSymbol;
+      std::string driverPath;
+      driverSymbol->getHierarchicalPath(driverPath);
+      std::cout << "First driver " << driverPath << "\n";
+    }
   }
-  return buffer;
+};
+
+void writeToFile(string_view fileName, string_view contents);
+
+void printJson(Compilation& compilation, const std::string& fileName,
+               const std::vector<std::string>& scopes) {
+    JsonWriter writer;
+    writer.setPrettyPrint(true);
+
+    ASTSerializer serializer(compilation, writer);
+    if (scopes.empty()) {
+        serializer.serialize(compilation.getRoot());
+    }
+    else {
+        for (auto& scopeName : scopes) {
+            auto sym = compilation.getRoot().lookupName(scopeName);
+            if (sym)
+                serializer.serialize(*sym);
+        }
+    }
+
+    writeToFile(fileName, writer.view());
+}
+
+template<typename Stream, typename String>
+void writeToFile(Stream& os, string_view fileName, String contents) {
+    os.write(contents.data(), contents.size());
+    os.flush();
+    if (!os)
+        throw std::runtime_error(fmt::format("Unable to write AST to '{}'", fileName));
+}
+
+void writeToFile(string_view fileName, string_view contents) {
+    if (fileName == "-") {
+        writeToFile(std::cout, "stdout", contents);
+    }
+    else {
+        std::ofstream file{std::string(fileName)};
+        writeToFile(file, fileName, contents);
+    }
 }
 
 int main(int argc, const char **argv) {
-  slang::CommandLine cmdLine;
+
+  Driver driver;
+  driver.addStandardArgs();
+
   std::optional<bool> showHelp;
   std::optional<bool> showVersion;
-  cmdLine.add("-h,--help", showHelp, "Display available options");
-  cmdLine.add("--version", showVersion, "Display version information and exit");
+  std::optional<bool> quiet;
+  std::optional<bool> dumpJson;
+  driver.cmdLine.add("-h,--help",   showHelp,    "Display available options and exit");
+  driver.cmdLine.add("--version",   showVersion, "Display version information and exit");
+  driver.cmdLine.add("-q,--quiet",  quiet,       "Suppress non-essential output");
 
-  // File list
-  std::vector<std::string> sourceFiles;
-  cmdLine.setPositional(sourceFiles, "files", /* isFileName */ true);
+  std::optional<std::string> astJsonFile;
+  driver.cmdLine.add("--ast-json", astJsonFile,
+                     "Dump the compiled AST in JSON format to the specified file, or '-' for stdout", "<file>",
+                     /* isFileName */ true);
 
-  if (cmdLine.parse(argc, argv)) {
-    for (auto &error : cmdLine.getErrors()) {
-      std::cerr << error << "\n";
-    }
+  std::vector<std::string> astJsonScopes;
+  driver.cmdLine.add("--ast-json-scope", astJsonScopes,
+                     "When dumping AST to JSON, include only the scopes specified by the "
+                     "given hierarchical paths",
+                     "<path>");
+
+  if (!driver.parseCommandLine(argc, argv)) {
+    return 1;
   }
 
   if (showHelp == true) {
-    std::cout << cmdLine.getHelpText("slang tool");
-    return 1;
+    printf("%s\n", driver.cmdLine.getHelpText("slang SystemVerilog compiler").c_str());
+    return 0;
   }
 
   if (showVersion == true) {
-    slang::OS::print("slang version {}.{}.{}\n",
-                     slang::VersionInfo::getMajor(),
-                     slang::VersionInfo::getMinor(),
-                     slang::VersionInfo::getRevision());
-    return 1;
+    printf("slang version %d.%d.%d+%s\n", VersionInfo::getMajor(),
+        VersionInfo::getMinor(), VersionInfo::getPatch(),
+        std::string(VersionInfo::getHash()).c_str());
+    return 0;
   }
 
-  bool anyErrors = false;
-  slang::SourceManager sourceManager;
-
-  slang::PreprocessorOptions ppoptions;
-  slang::LexerOptions loptions;
-  slang::ParserOptions poptions;
-  slang::CompilationOptions coptions;
-
-  slang::Bag options;
-  options.set(ppoptions);
-  options.set(loptions);
-  options.set(poptions);
-  options.set(coptions);
-
-  std::vector<slang::SourceBuffer> buffers;
-  for (const std::string& file : sourceFiles) {
-    slang::SourceBuffer buffer = readSource(sourceManager, file);
-    if (!buffer) {
-      anyErrors = true;
-      continue;
-    }
-    buffers.push_back(buffer);
-  }
-
-  if (anyErrors) {
+  if (!driver.processOptions()) {
     return 2;
   }
 
-  if (buffers.empty()) {
-    slang::OS::printE(fg(errorColor), "error: ");
-    slang::OS::printE("no input files\n");
-    return 3;
+  bool ok = driver.parseAllSources();
+
+  auto compilation = driver.createCompilation();
+  ok &= driver.reportCompilation(*compilation, quiet == true);
+
+  if (!ok) {
+    return ok;
   }
 
-  try {
-    // Create compilation objects.
-    slang::Compilation compilation(options);
-    slang::DiagnosticEngine diagEngine(*compilation.getSourceManager());
-    auto diagClient = std::make_shared<slang::TextDiagnosticClient>();
-    diagEngine.addClient(diagClient);
-    // Load sources
-    for (const slang::SourceBuffer &buffer : buffers) {
-      auto tree = slang::SyntaxTree::fromBuffer(buffer, sourceManager, options);
-      compilation.addSyntaxTree(tree);
-    }
-    //// Diagnostic options
-    //diagClient->showColors(true);
-    //diagClient->showColumn(true);
-    //diagClient->showLocation(true);
-    //diagClient->showSourceLine(true);
-    //diagClient->showOptionName(true);
-    //diagClient->showIncludeStack(true);
-    //diagClient->showMacroExpansion(true);
-    //diagClient->showHierarchyInstance(true);
-    //diagEngine.setErrorLimit(20);
-    //diagEngine.setDefaultWarnings();
-    ////slang::Diagnostics optionDiags = diagEngine.setWarningOptions({});
-    ////slang::Diagnostics pragmaDiags = diagEngine.setMappingsFromPragmas();
-    ////for (auto& diag : optionDiags) {
-    ////  diagEngine.issue(diag);
-    ////}
-    ////for (auto& diag : pragmaDiags) {
-    ////  diagEngine.issue(diag);
-    ////}
-    //// Perform compilation.
-    //for (auto &diag : compilation.getAllDiagnostics()) {
-    //  diagEngine.issue(diag);
-    //}
-    //anyErrors |= diagEngine.getNumErrors() != 0;
-    slang::JsonWriter writer;
-    writer.setPrettyPrint(true);
-    slang::ASTSerializer serializer(compilation, writer);
-    serializer.serialize(compilation.getRoot());
-    std::cout.write(writer.view().data(), writer.view().size());
-    std::cout.flush();
-  } catch (const std::exception& e) {
-    slang::OS::printE("internal compiler error: {}\n", e.what());
-    return 4;
+  if (astJsonFile) {
+    printJson(*compilation, *astJsonFile, astJsonScopes);
+    return 0;
   }
 
-  return anyErrors ? 1 : 0;
+  ToolVisitor visitor;
+  compilation->getRoot().visit(visitor);
+
+  return 0;
 }
