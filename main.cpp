@@ -10,6 +10,7 @@
 #include "slang/diagnostics/SysFuncsDiags.h"
 #include "slang/diagnostics/TextDiagnosticClient.h"
 #include "slang/parsing/Preprocessor.h"
+#include "slang/symbols/ASTVisitor.h"
 #include "slang/symbols/ASTSerializer.h"
 #include "slang/symbols/CompilationUnitSymbols.h"
 #include "slang/symbols/InstanceSymbols.h"
@@ -23,10 +24,10 @@
 #include "slang/util/Version.h"
 
 
-static constexpr auto noteColor = fmt::terminal_color::bright_black;
-static constexpr auto warningColor = fmt::terminal_color::bright_yellow;
+//static constexpr auto noteColor = fmt::terminal_color::bright_black;
+//static constexpr auto warningColor = fmt::terminal_color::bright_yellow;
 static constexpr auto errorColor = fmt::terminal_color::bright_red;
-static constexpr auto highlightColor = fmt::terminal_color::bright_green;
+//static constexpr auto highlightColor = fmt::terminal_color::bright_green;
 
 slang::SourceBuffer readSource(slang::SourceManager &sourceManager, const std::string &file) {
   slang::SourceBuffer buffer = sourceManager.readSource(slang::widen(file));
@@ -36,6 +37,23 @@ slang::SourceBuffer readSource(slang::SourceManager &sourceManager, const std::s
   }
   return buffer;
 }
+
+class ToolVisitor : public slang::ASTVisitor<ToolVisitor, true, true> {
+public:
+  ToolVisitor() {}
+
+  void handle(const slang::VariableSymbol &symbol) {
+    std::string path;
+    symbol.getHierarchicalPath(path);
+    std::cout << "Visited Variable " << path << "\n";
+    if (symbol.getFirstDriver()) {
+      const slang::Symbol *driverSymbol = symbol.getFirstDriver()->containingSymbol;
+      std::string driverPath;
+      driverSymbol->getHierarchicalPath(driverPath);
+      std::cout << "First driver " << driverPath << "\n";
+    }
+  }
+};
 
 int main(int argc, const char **argv) {
   slang::CommandLine cmdLine;
@@ -136,12 +154,18 @@ int main(int argc, const char **argv) {
     //  diagEngine.issue(diag);
     //}
     //anyErrors |= diagEngine.getNumErrors() != 0;
+
     slang::JsonWriter writer;
     writer.setPrettyPrint(true);
     slang::ASTSerializer serializer(compilation, writer);
     serializer.serialize(compilation.getRoot());
     std::cout.write(writer.view().data(), writer.view().size());
     std::cout.flush();
+
+    std::cout << "ToolVisitor\n"; 
+    ToolVisitor visitor;
+    compilation.getRoot().visit(visitor);
+
   } catch (const std::exception& e) {
     slang::OS::printE("internal compiler error: {}\n", e.what());
     return 4;
