@@ -18,22 +18,256 @@ using namespace slang;
 using namespace slang::ast;
 using namespace slang::driver;
 
-class ToolVisitor : public ASTVisitor<ToolVisitor, true, false> {
-public:
-  ToolVisitor() {}
+/*class ForLoopUnrollVisitor : public ASTVisitor<ForLoopUnrollVisitor, true, false> {
+  EvalContext evalCtx;
+  Compilation &compilation;
 
-  void handle(const VariableSymbol &symbol) {
-    std::string path;
-    symbol.getHierarchicalPath(path);
-    std::cout << "Visited Variable " << path << "\n";
-    if (symbol.getFirstDriver()) {
-      const Symbol *driverSymbol = symbol.getFirstDriver()->containingSymbol;
-      std::string driverPath;
-      driverSymbol->getHierarchicalPath(driverPath);
-      std::cout << "First driver " << driverPath << "\n";
-    }
+public:
+  bool anyErrors = false;
+
+  ForLoopUnrollVisitor(Compilation &compilation) : compilation(compilation) {
+    evalCtx.pushEmptyFrame();
   }
+
+  using ER = ast::Statement::EvalResult;
+
+  //void handle(const VariableSymbol &symbol) {
+  //  std::string path;
+  //  symbol.getHierarchicalPath(path);
+  //  std::cout << "Visited Variable " << path << "\n";
+  //  auto driver = symbol.getFirstDriver();
+  //  while (driver != nullptr) {
+  //    const Symbol *driverSymbol = symbol.getFirstDriver()->containingSymbol;
+  //    std::string driverPath;
+  //    driverSymbol->getHierarchicalPath(driverPath);
+  //    std::cout << "Driver " << driverPath << "\n";
+  //    driver = driver->getNextDriver();
+  //  }
+  //}
+
+  //ER evalForLoopStatement(const ForLoopStatement &stmt) {
+  //  EvalContext context(compilation);
+  //  for (auto init : stmt.initializers) {
+  //    if (!init->eval(context)) {
+  //      std::cout << "Initialiser fail\n";
+  //      return ER::Fail;
+  //    }
+  //  }
+  //  while (true) {
+  //    if (stmt.stopExpr) {
+  //      auto result = stmt.stopExpr->eval(context);
+  //      if (result.bad()) {
+  //        std::cout << "Stop fail\n";
+  //        return ER::Fail;
+  //      }
+  //      if (!result.isTrue()) {
+  //        break;
+  //      }
+  //    }
+  //    std::cout << "Loop body\n";
+  //    for (auto step : stmt.steps) {
+  //      if (!step->eval(context)) {
+  //        std::cout << "Step fail\n";
+  //        return ER::Fail;
+  //      }
+  //    }
+  //  }
+  //  return ER::Success;
+  //}
+
+  void handle (const ForLoopStatement &loop) {
+    std::cout << "ForLoopStatement\n";
+    //auto result = evalForLoopStatement(stmt);
+    //std::cout << "Result " << (int)result << "\n";
+
+    if (loop.loopVars.empty() || !loop.stopExpr || loop.steps.empty() || anyErrors) {
+      loop.body.visit(*this);
+      return;
+    }
+        
+    // Attempt to unroll the loop. If we are unable to collect constant values
+    // for all loop variables across all iterations, we won't unroll at all.
+    auto handleFail = [&] {
+      for (auto var : loop.loopVars) {
+        evalCtx.deleteLocal(var);
+      }
+      loop.body.visit(*this);
+    };
+
+    // Loop variables.
+    SmallVector<ConstantValue*> localPtrs;
+    for (auto var : loop.loopVars) {
+      auto init = var->getInitializer();
+      if (!init) {
+          handleFail();
+          return;
+      }
+
+      auto cv = init->eval(evalCtx);
+      if (!cv) {
+          handleFail();
+          return;
+      }
+
+      localPtrs.push_back(evalCtx.createLocal(var, std::move(cv)));
+    }
+
+    // Loop iterations.
+    SmallVector<ConstantValue, 16> values;
+    while (true) {
+        auto cv = step() ? loop.stopExpr->eval(evalCtx) : ConstantValue();
+        if (!cv) {
+            handleFail();
+            return;
+        }
+
+        if (!cv.isTrue())
+            break;
+
+        for (auto local : localPtrs)
+            values.emplace_back(*local);
+
+        for (auto step : loop.steps) {
+            if (!step->eval(evalCtx)) {
+                handleFail();
+                return;
+            }
+        }
+    }
+
+  }
+};*/
+
+class UnrollVisitor : public ASTVisitor<UnrollVisitor, true, false> {
+public:
+    bool anyErrors = false;
+
+    explicit UnrollVisitor(Compilation &compilation) :
+        evalCtx(compilation) {
+        evalCtx.pushEmptyFrame();
+    }
+
+    void handle(const ForLoopStatement& loop) {
+        if (loop.loopVars.empty() || !loop.stopExpr || loop.steps.empty() || anyErrors) {
+            loop.body.visit(*this);
+            return;
+        }
+
+        // Attempt to unroll the loop. If we are unable to collect constant values
+        // for all loop variables across all iterations, we won't unroll at all.
+        auto handleFail = [&] {
+            for (auto var : loop.loopVars)
+                evalCtx.deleteLocal(var);
+            loop.body.visit(*this);
+        };
+
+        SmallVector<ConstantValue*> localPtrs;
+        for (auto var : loop.loopVars) {
+            auto init = var->getInitializer();
+            if (!init) {
+                handleFail();
+                return;
+            }
+
+            auto cv = init->eval(evalCtx);
+            if (!cv) {
+                handleFail();
+                return;
+            }
+
+            localPtrs.push_back(evalCtx.createLocal(var, std::move(cv)));
+        }
+
+        SmallVector<ConstantValue, 16> values;
+        while (true) {
+            auto cv = step() ? loop.stopExpr->eval(evalCtx) : ConstantValue();
+            if (!cv) {
+                handleFail();
+                return;
+            }
+
+            if (!cv.isTrue())
+                break;
+
+            for (auto local : localPtrs)
+                values.emplace_back(*local);
+
+            for (auto step : loop.steps) {
+                if (!step->eval(evalCtx)) {
+                    handleFail();
+                    return;
+                }
+            }
+        }
+
+        // We have all the loop iteration values. Go back through
+        // and visit the loop body for each iteration.
+        for (size_t i = 0; i < values.size();) {
+            for (auto local : localPtrs)
+                *local = std::move(values[i++]);
+
+            std::cout << "visit body\n";
+            loop.body.visit(*this);
+            if (anyErrors)
+                return;
+        }
+    }
+
+    void handle(const ConditionalStatement& stmt) {
+        std::cout << "ConditionalStatement\n";
+        // Evaluate the condition; if not constant visit both sides,
+        // otherwise visit only the side that matches the condition.
+        auto fallback = [&] {
+            stmt.ifTrue.visit(*this);
+            if (stmt.ifFalse)
+                stmt.ifFalse->visit(*this);
+        };
+
+        for (auto& cond : stmt.conditions) {
+            if (cond.pattern || !step()) {
+                fallback();
+                return;
+            }
+
+            auto result = cond.expr->eval(evalCtx);
+            if (!result) {
+                fallback();
+                return;
+            }
+
+            if (!result.isTrue()) {
+                if (stmt.ifFalse)
+                    stmt.ifFalse->visit(*this);
+                return;
+            }
+        }
+
+        stmt.ifTrue.visit(*this);
+    }
+
+    void handle(const ExpressionStatement& stmt) {
+        std::cout << "ExpressionStatement\n";
+        step();
+        //if (stmt.expr.kind == ExpressionKind::Assignment) {
+        //    auto& assign = stmt.expr.as<AssignmentExpression>();
+        //    auto flags = assign.isNonBlocking() ? AssignFlags::NonBlocking : AssignFlags::None;
+        //    anyErrors |= !assign.left().requireLValue(astCtx, {}, flags, nullptr, &evalCtx);
+        //}
+    }
+
+private:
+    bool step() {
+        if (anyErrors || !evalCtx.step(SourceLocation::NoLocation)) {
+            anyErrors = true;
+            return false;
+        }
+        return true;
+    }
+
+    //ASTContext astCtx;
+    EvalContext evalCtx;
 };
+
 
 void writeToFile(string_view fileName, string_view contents);
 
@@ -133,7 +367,7 @@ int main(int argc, const char **argv) {
     return 0;
   }
 
-  ToolVisitor visitor;
+  UnrollVisitor visitor(*compilation);
   compilation->getRoot().visit(visitor);
 
   return 0;

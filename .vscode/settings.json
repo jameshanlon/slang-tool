@@ -1,7 +1,10 @@
 {
     "cmake.configureSettings": {
       "CMAKE_BUILD_TYPE": "Debug",
-      "CMAKE_INSTALL_PREFIX": "/home/jamie/slang-tool/install",
+      "CMAKE_INSTALL_PREFIX": "../install",
       "CMAKE_GENERATOR": "Unix Makefiles",
+    },
+    "files.associations": {
+      "*.ipp": "cpp"
     },
   }
