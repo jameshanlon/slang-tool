@@ -26,7 +26,7 @@ FetchContent_Declare(
   slang
   GIT_REPOSITORY https://github.com/MikePopoloski/slang.git
   GIT_SHALLOW ON
-  GIT_TAG v2.0)
+  GIT_COMMIT a695ad2522e874e0593737402f24e8cc08278d16)
 FetchContent_MakeAvailable(slang)
 
 add_executable(main main.cpp)
